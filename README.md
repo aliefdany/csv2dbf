@@ -22,7 +22,7 @@ A Python-based command-line tool for converting CSV files to DBF format. This to
 1. Download the package files:
 
    ```bash
-   git clone https://github.com/yourusername/csv2dbf.git
+   git clone https://github.com/aliefdany/csv2dbf.git
    cd csv2dbf
    ```
 
