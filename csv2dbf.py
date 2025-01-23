@@ -4,151 +4,88 @@ import dbf
 import pandas as pd
 import sys
 import argparse
-from datetime import datetime
 import numpy as np
 
-def determine_numeric_field_spec(series):
+def determine_field_specs(column):
     """
-    Determine appropriate numeric field specifications for a pandas series
-    Returns tuple of (length, decimal_places)
+    Determine appropriate field specifications for a column
     """
-    max_val = series.abs().max()
-    min_val = series.abs().min()
+    # Handle numeric columns
+    if pd.api.types.is_numeric_dtype(column):
+        # Get max absolute value to determine field length
+        max_val = column.abs().max()
+        is_float = column.dtype == float
+        
+        # Determine length and decimal places
+        if pd.isna(max_val):
+            length, decimals = 10, 2  # Default numeric field
+        elif is_float:
+            # Count max decimal places
+            decimal_places = column.astype(str).str.split('.').str[1].str.len().max()
+            total_length = len(str(int(max_val))) + decimal_places + 1  # +1 for decimal point
+            length = max(total_length, 10)
+            decimals = min(decimal_places, 4)  # Limit decimal places
+        else:
+            length = len(str(int(max_val))) + 1  # +1 for potential sign
+            decimals = 0
+        
+        return f'N({min(length, 20)},{decimals})'
     
-    # Handle integers
-    if series.dtype in ['int64', 'int32']:
-        str_len = len(str(int(max_val)))
-        return (str_len + 1, 0)  # +1 for sign
+    # Handle date columns
+    elif pd.api.types.is_datetime64_any_dtype(column):
+        return 'D'
     
-    # Handle floats
-    decimal_str = series.astype(str)
-    max_decimals = 0
-    max_total_len = 0
-    
-    for val in decimal_str:
-        if '.' in val:
-            integer_part, decimal_part = val.split('.')
-            max_decimals = max(max_decimals, len(decimal_part))
-            total_len = len(integer_part) + len(decimal_part) + 1  # +1 for decimal point
-            max_total_len = max(max_total_len, total_len)
-    
-    # Ensure minimum field length and valid decimal places
-    field_length = max(max_total_len + 1, 3)  # +1 for sign
-    decimal_places = min(max_decimals, field_length - 2)  # Ensure decimal places are valid
-    
-    return (field_length, decimal_places)
-
-def is_date(series):
-    """
-    Check if a series contains date values
-    """
-    try:
-        pd.to_datetime(series.dropna(), errors='raise')
-        return True
-    except:
-        return False
-
-def format_date(value):
-    """
-    Format date value for DBF
-    """
-    if pd.isna(value):
-        return None
-    try:
-        if isinstance(value, str):
-            return pd.to_datetime(value).date()
-        return pd.Timestamp(value).date()
-    except:
-        return None
+    # Handle string columns
+    else:
+        max_length = column.astype(str).str.len().max()
+        return f'C({min(max_length, 254)})'
 
 def csv_to_dbf(csv_file, dbf_file, delimiter=',', encoding='utf-8'):
     """
-    Convert a CSV file to DBF format using the dbf package
-    
-    Args:
-        csv_file (str): Path to input CSV file
-        dbf_file (str): Path to output DBF file
-        delimiter (str): CSV delimiter character
-        encoding (str): Input file encoding
+    Convert CSV to DBF with precise type handling
     """
     try:
-        # Read CSV file using pandas
-        print(f"Reading CSV file: {csv_file}")
+        # Read CSV file
         df = pd.read_csv(csv_file, delimiter=delimiter, encoding=encoding)
         
-        # Print original columns for debugging
-        print("\nOriginal CSV columns:")
-        for col in df.columns:
-            print(f"- {col}")
-        
-        # Create field specifications for DBF
+        # Prepare field specifications
         field_specs = []
-        date_columns = []  # Track date columns for conversion
-        
         for column in df.columns:
-            # Clean column name - remove spaces and special characters
+            # Clean column name
             clean_column = ''.join(e for e in column if e.isalnum())[:10]
             
-            # Get column data for type inference
-            column_data = df[column].dropna()
-            
-            # Check for date fields first
-            if is_date(df[column]):
-                field_specs.append(f'{clean_column} D')
-                date_columns.append(column)
-            # Then check for numeric fields
-            elif pd.to_numeric(df[column], errors='coerce').notnull().all():
-                # Handle numeric fields
-                length, decimals = determine_numeric_field_spec(pd.to_numeric(df[column]))
-                field_specs.append(f'{clean_column} N({length},{decimals})')
-            else:
-                # Handle string fields
-                max_length = df[column].astype(str).str.len().max()
-                field_specs.append(f'{clean_column} C({min(max_length, 254)})')
+            # Determine field specification
+            field_type = determine_field_specs(df[column])
+            field_specs.append(f'{clean_column} {field_type}')
         
-        # Print field specifications for debugging
-        print("\nDBF field specifications:")
-        for spec in field_specs:
-            print(f"- {spec}")
-        
-        # Create new DBF table
+        # Create DBF table
         table = dbf.Table(dbf_file, ';'.join(field_specs), codepage='utf8')
         table.open(mode=dbf.READ_WRITE)
         
-        # Print actual DBF field names for debugging
-        print("\nActual DBF field names:")
-        for field in table.field_names:
-            print(f"- {field}")
-        
         # Write records
-        total_records = len(df)
-        print(f"\nWriting {total_records} records to DBF file...")
-        
-        for idx, row in df.iterrows():
+        for _, row in df.iterrows():
             record = []
             for column in df.columns:
                 value = row[column]
-                # Handle date fields
-                if column in date_columns:
-                    value = format_date(value)
-                # Handle other fields
+                
+                # Handle numeric columns to preserve exact value
+                if pd.api.types.is_numeric_dtype(df[column]):
+                    value = float(value) if pd.notnull(value) else None
+                
+                # Handle datetime columns
+                elif pd.api.types.is_datetime64_any_dtype(df[column]):
+                    value = value.date() if pd.notnull(value) else None
+                
+                # Handle other columns
                 elif pd.isna(value):
                     value = None
+                
                 record.append(value)
             
-            try:
-                table.append(tuple(record))
-            except Exception as e:
-                print(f"Error writing record {idx + 1}: {str(e)}")
-                print(f"Record data: {record}")
-                continue
-            
-            # Print progress every 1000 records
-            if (idx + 1) % 1000 == 0:
-                print(f"Processed {idx + 1}/{total_records} records...")
+            table.append(tuple(record))
         
         table.close()
-        print(f"\nSuccessfully converted {csv_file} to {dbf_file}")
+        print(f"Successfully converted {csv_file} to {dbf_file}")
         return True
         
     except Exception as e:
@@ -161,7 +98,6 @@ def main():
     parser.add_argument('output', help='Output DBF file')
     parser.add_argument('-d', '--delimiter', default=',', help='CSV delimiter (default: ,)')
     parser.add_argument('-e', '--encoding', default='utf-8', help='Input file encoding (default: utf-8)')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     
     args = parser.parse_args()
     
